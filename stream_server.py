@@ -1,158 +1,165 @@
 from flask import Flask, Response, render_template_string
 import cv2
 import numpy as np
-from flask import jsonify
+import os
+from pathlib import Path
+from models import load_models, MODEL_MEAN_VALUES, GENDER_LIST
 
 app = Flask(__name__)
 
+# Environment variables for configuration
+PORT = int(os.environ.get('PORT', 8000))
+DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
+
 # Initialize video capture
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    raise RuntimeError("Could not open video source")
+try:
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open video source")
+except Exception as e:
+    print(f"Error initializing video capture: {e}")
 
 # Load models
-faceProto = "opencv_face_detector.pbtxt"
-faceModel = "opencv_face_detector_uint8.pb"
-genderProto = "gender_deploy.prototxt"
-genderModel = "gender_net.caffemodel"
-
-MODEL_MEAN_VALUES = (78.4263377603, 87.7689143744, 114.895847746)
-genderList = ['Male', 'Female']
-
-faceNet = cv2.dnn.readNet(faceModel, faceProto)
-genderNet = cv2.dnn.readNet(genderModel, genderProto)
+try:
+    faceNet, genderNet = load_models()
+except Exception as e:
+    print(f"Error loading models: {e}")
 
 padding = 20
-detection_info = {}
 
 def getFaceBox(net, frame, conf_threshold=0.7):
-    frameOpencvDnn = frame.copy()
-    frameHeight = frameOpencvDnn.shape[0]
-    frameWidth = frameOpencvDnn.shape[1]
-    blob = cv2.dnn.blobFromImage(frameOpencvDnn, 1.0, (300, 300), [104, 117, 123], True, False)
-    net.setInput(blob)
-    detections = net.forward()
-    bboxes = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > conf_threshold:
-            x1 = int(detections[0, 0, i, 3] * frameWidth)
-            y1 = int(detections[0, 0, i, 4] * frameHeight)
-            x2 = int(detections[0, 0, i, 5] * frameWidth)
-            y2 = int(detections[0, 0, i, 6] * frameHeight)
-            bboxes.append([x1, y1, x2, y2])
-            cv2.rectangle(frameOpencvDnn, (x1, y1), (x2, y2), (0, 255, 0), int(round(frameHeight/150)), 8)
-    return frameOpencvDnn, bboxes
+    try:
+        frameOpencvDnn = frame.copy()
+        frameHeight = frameOpencvDnn.shape[0]
+        frameWidth = frameOpencvDnn.shape[1]
+        blob = cv2.dnn.blobFromImage(frameOpencvDnn, 1.0, (300, 300), [104, 117, 123], True, False)
+        net.setInput(blob)
+        detections = net.forward()
+        bboxes = []
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > conf_threshold:
+                x1 = int(detections[0, 0, i, 3] * frameWidth)
+                y1 = int(detections[0, 0, i, 4] * frameHeight)
+                x2 = int(detections[0, 0, i, 5] * frameWidth)
+                y2 = int(detections[0, 0, i, 6] * frameHeight)
+                bboxes.append([x1, y1, x2, y2])
+                cv2.rectangle(frameOpencvDnn, (x1, y1), (x2, y2), (0, 255, 0), int(round(frameHeight/150)), 8)
+        return frameOpencvDnn, bboxes
+    except Exception as e:
+        print(f"Error in face detection: {e}")
+        return frame, []
 
 def check_coverage(frame, grid_rows=3, grid_cols=3, variance_threshold=100.0):
-    height, width = frame.shape[:2]
-    cell_height = height // grid_rows
-    cell_width = width // grid_cols
-    covered_cells = 0
-    total_cells = grid_rows * grid_cols
-    
-    for i in range(grid_rows):
-        for j in range(grid_cols):
-            y1 = i * cell_height
-            y2 = (i + 1) * cell_height if i < grid_rows - 1 else height
-            x1 = j * cell_width
-            x2 = (j + 1) * cell_width if j < grid_cols - 1 else width
-            cell = frame[y1:y2, x1:x2]
-            gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-            var = laplacian.var()
-            if var < variance_threshold:
-                covered_cells += 1
-    
-    coverage_ratio = covered_cells / total_cells
-    return coverage_ratio
+    try:
+        height, width = frame.shape[:2]
+        cell_height = height // grid_rows
+        cell_width = width // grid_cols
+        covered_cells = 0
+        total_cells = grid_rows * grid_cols
+        
+        for i in range(grid_rows):
+            for j in range(grid_cols):
+                y1 = i * cell_height
+                y2 = (i + 1) * cell_height if i < grid_rows - 1 else height
+                x1 = j * cell_width
+                x2 = (j + 1) * cell_width if j < grid_cols - 1 else width
+                cell = frame[y1:y2, x1:x2]
+                gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+                laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+                var = laplacian.var()
+                if var < variance_threshold:
+                    covered_cells += 1
+        
+        return covered_cells / total_cells
+    except Exception as e:
+        print(f"Error in coverage detection: {e}")
+        return 0.0
 
 def generate_frames():
     while True:
-        success, frame = cap.read()
-        if not success:
-            break
+        try:
+            success, frame = cap.read()
+            if not success:
+                print("Failed to grab frame")
+                break
 
-        # Process frame with face detection
-        frameFace, bboxes = getFaceBox(faceNet, frame)
-        
-        numMales = 0
-        numFemales = 0
-        numPersons = len(bboxes)
-        
-        # Process each detected face
-        for bbox in bboxes:
-            face = frame[max(0,bbox[1]-padding):min(bbox[3]+padding,frame.shape[0]-1),
-                        max(0,bbox[0]-padding):min(bbox[2]+padding, frame.shape[1]-1)]
+            # Process frame with face detection
+            frameFace, bboxes = getFaceBox(faceNet, frame)
             
-            # Gender detection
-            blob = cv2.dnn.blobFromImage(face, 1.0, (227, 227), MODEL_MEAN_VALUES, swapRB=False)
-            genderNet.setInput(blob)
-            genderPreds = genderNet.forward()
-            gender = genderList[genderPreds[0].argmax()]
+            numMales = 0
+            numFemales = 0
+            numPersons = len(bboxes)
             
-            # Add gender label to frame
-            label = f"{gender}"
-            cv2.putText(frameFace, label, (bbox[0], bbox[1]-10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+            # Process each detected face
+            for bbox in bboxes:
+                try:
+                    face = frame[max(0,bbox[1]-padding):min(bbox[3]+padding,frame.shape[0]-1),
+                               max(0,bbox[0]-padding):min(bbox[2]+padding, frame.shape[1]-1)]
+                    
+                    # Gender detection
+                    blob = cv2.dnn.blobFromImage(face, 1.0, (227, 227), MODEL_MEAN_VALUES, swapRB=False)
+                    genderNet.setInput(blob)
+                    genderPreds = genderNet.forward()
+                    gender = GENDER_LIST[genderPreds[0].argmax()]
+                    
+                    # Add gender label to frame
+                    label = f"{gender}"
+                    cv2.putText(frameFace, label, (bbox[0], bbox[1]-10),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+                    
+                    # Update counts
+                    if gender == 'Male':
+                        numMales += 1
+                    else:
+                        numFemales += 1
+                except Exception as e:
+                    print(f"Error processing face: {e}")
+                    continue
             
-            # Update counts
-            if gender == 'Male':
-                numMales += 1
-            else:
-                numFemales += 1
-        
-        # Determine status
-        status = "No person detected"
-        if numPersons >= 1:
-            if numFemales == 1:
-                if numMales >= 3:
-                    status = "Warning: Woman is surrounded by men"
-                else:
-                    status = "Woman is alone"
-            elif numPersons >= 2:
-                status = "Multiple persons detected"
-        
-        # Check coverage
-        coverage_ratio = check_coverage(frame)
-        coverage_status = f"Coverage: {coverage_ratio:.2f}"
-        if coverage_ratio >= 0.99:
-            coverage_status = "Warning: 100% display is covered!"
-        elif coverage_ratio >= 0.4:
-            coverage_status = "Warning: Screen covered over 40%!"
-        
-        # Add overlay text to frame
-        cv2.putText(frameFace, f"Persons: {numPersons}", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frameFace, f"Males: {numMales}", (10, 60),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        cv2.putText(frameFace, f"Females: {numFemales}", (10, 90),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-        cv2.putText(frameFace, status, (10, 120),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(frameFace, coverage_status, (10, 150),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        # Update detection info
-        global detection_info
-        detection_info = {
-            "num_persons": numPersons,
-            "num_males": numMales,
-            "num_females": numFemales,
-            "status": status,
-            "coverage_ratio": coverage_ratio,
-            "coverage_status": coverage_status
-        }
-        
-        # Convert frame to JPEG
-        ret, buffer = cv2.imencode('.jpg', frameFace)
-        if not ret:
+            # Determine status
+            status = "No person detected"
+            if numPersons >= 1:
+                if numFemales == 1:
+                    if numMales >= 3:
+                        status = "Warning: Woman is surrounded by men"
+                    else:
+                        status = "Woman is alone"
+                elif numPersons >= 2:
+                    status = "Multiple persons detected"
+            
+            # Check coverage
+            coverage_ratio = check_coverage(frame)
+            coverage_status = f"Coverage: {coverage_ratio:.2f}"
+            if coverage_ratio >= 0.99:
+                coverage_status = "Warning: 100% display is covered!"
+            elif coverage_ratio >= 0.4:
+                coverage_status = "Warning: Screen covered over 40%!"
+            
+            # Add overlay text to frame
+            cv2.putText(frameFace, f"Persons: {numPersons}", (10, 30),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frameFace, f"Males: {numMales}", (10, 60),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            cv2.putText(frameFace, f"Females: {numFemales}", (10, 90),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+            cv2.putText(frameFace, status, (10, 120),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(frameFace, coverage_status, (10, 150),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # Convert frame to JPEG
+            ret, buffer = cv2.imencode('.jpg', frameFace)
+            if not ret:
+                print("Failed to encode frame")
+                continue
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                  b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception as e:
+            print(f"Error in frame generation: {e}")
             continue
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-# HTML template
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -619,9 +626,39 @@ def video_feed():
     return Response(generate_frames(),
                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/detection_info')
-def get_detection_info():
-    return jsonify(detection_info)
+@app.errorhandler(404)
+def not_found_error(error):
+    return render_template_string("""
+        <div style="text-align: center; padding: 50px;">
+            <h1>404 - Page Not Found</h1>
+            <p>The requested page could not be found.</p>
+            <a href="/" class="btn btn-primary">Return to Home</a>
+        </div>
+    """), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return render_template_string("""
+        <div style="text-align: center; padding: 50px;">
+            <h1>500 - Internal Server Error</h1>
+            <p>Something went wrong on our end. Please try again later.</p>
+            <a href="/" class="btn btn-primary">Return to Home</a>
+        </div>
+    """), 500
+
+def cleanup():
+    print("Cleaning up resources...")
+    if cap is not None:
+        cap.release()
+
+import atexit
+atexit.register(cleanup)
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8000)
+    try:
+        # Vercel requires port 3000
+        port = int(os.environ.get('PORT', 3000))
+        app.run(host='0.0.0.0', port=port, debug=DEBUG)
+    except Exception as e:
+        print(f"Error starting server: {e}")
+        cleanup()
