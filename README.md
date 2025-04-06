@@ -148,9 +148,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📧 Contact
 
-Your Name - [@yourusername](https://twitter.com/yourusername)
+Your Name - [arghyadgp4@gmail.com]
 
-Project Link: [https://github.com/yourusername/safenest](https://github.com/yourusername/safenest)
+Project Link: [https://github.com/braoninja79/safenest-2.0]
 
 ## ⚠️ Disclaimer
 
